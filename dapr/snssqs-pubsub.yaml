@@ -1,0 +1,17 @@
+
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: snssqs-pubsub
+  namespace: dapr-apps
+spec:
+  type: pubsub.aws.snssqs
+  version: v1
+  metadata:
+  - name: region
+    value: us-east-1
+  - name: disableEntityManagement
+    value: "false"
+scopes:
+- productservice
+- orderservice

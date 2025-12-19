@@ -1,0 +1,39 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orderservice
+  namespace: dapr-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orderservice
+  template:
+    metadata:
+      labels:
+        app: orderservice
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "orderservice"
+        dapr.io/app-port: "8090"
+    spec:
+      serviceAccountName: dapr-pubsub-sa
+      containers:
+      - name: orderservice
+        image: 946248011760.dkr.ecr.us-east-1.amazonaws.com/dapr-eks-pubsub/orderservice:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orderservice
+  namespace: dapr-apps
+spec:
+  selector:
+    app: orderservice
+  ports:
+  - port: 8090
+    targetPort: 8090

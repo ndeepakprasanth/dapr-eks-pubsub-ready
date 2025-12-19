@@ -1,0 +1,44 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: productservice
+  namespace: dapr-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: productservice
+  template:
+    metadata:
+      labels:
+        app: productservice
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "productservice"
+        dapr.io/app-port: "8080"
+    spec:
+      serviceAccountName: dapr-pubsub-sa
+      containers:
+      - name: productservice
+        image: 946248011760.dkr.ecr.us-east-1.amazonaws.com/dapr-eks-pubsub/productservice:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        env:
+        - name: PUBSUB_NAME
+          value: snssqs-pubsub
+        - name: TOPIC_NAME
+          value: orders
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: productservice
+  namespace: dapr-apps
+spec:
+  selector:
+    app: productservice
+  ports:
+  - port: 8080
+    targetPort: 8080

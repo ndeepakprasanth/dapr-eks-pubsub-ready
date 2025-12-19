@@ -62,13 +62,25 @@ done
 kubectl get ns "$NAMESPACE" >/dev/null 2>&1 || kubectl create ns "$NAMESPACE"
 
 # ========= Dapr control plane =========
-helm repo add dapr https://dapr.github.io/helm-charts >/dev/null
-helm repo update >/dev/null
+# Idempotent Helm repo add/update, then install/upgrade control plane
+if ! helm repo list | awk '{print $1}' | grep -qx dapr; then
+  helm repo add dapr https://dapr.github.io/helm-charts
+else
+  helm repo add dapr https://dapr.github.io/helm-charts --force-update
+fi
+helm repo update
+
 echo "==> Installing/Upgrading Dapr control plane"
 helm upgrade --install dapr dapr/dapr \
   --namespace dapr-system \
   --create-namespace \
   --wait
+
+
+# ========= Enable OIDC provider for IRSA =========
+echo "==> Associating OIDC provider for cluster (required for IRSA)"
+eksctl utils associate-iam-oidc-provider --region "$REGION" --cluster "$CLUSTER_NAME" --approve
+
 
 # ========= IRSA v2 policy for SNS/SQS =========
 mkdir -p eks

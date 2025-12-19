@@ -22,23 +22,40 @@ IMAGE_TAG="${IMAGE_TAG:-$(date -u +%Y%m%d%H%M%S)}"
 echo "==> Using ACCOUNT_ID=$ACCOUNT_ID REGION=$REGION CLUSTER_NAME=$CLUSTER_NAME NAMESPACE=$NAMESPACE"
 aws configure set region "$REGION"
 
-#EKS cluster creation
 
-eksctl create cluster \
-  --name introspect-cluster \
-  --region us-east-1 \
-  --nodegroup-name ng-1 \
-  --node-type t3.medium \
-  --nodes 2 \
-  --nodes-min 1 \
-  --nodes-max 3 \
-  --managed
+# ========= EKS cluster creation (idempotent) =========
+echo "==> Checking if EKS cluster '$CLUSTER_NAME' exists in $REGION"
+if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
+  echo "   Cluster '$CLUSTER_NAME' already exists. Skipping creation."
+else
+  echo "==> Creating EKS cluster '$CLUSTER_NAME' in $REGION"
+  eksctl create cluster \
+    --name "$CLUSTER_NAME" \
+    --region "$REGION" \
+    --nodegroup-name ng-1 \
+    --node-type t3.medium \
+    --nodes 2 \
+    --nodes-min 1 \
+    --nodes-max 3 \
+    --managed
 
-sleep 60
+  echo "==> Waiting for EKS control plane to become active"
+  aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
+fi
 
+echo "==> Updating kubeconfig"
+aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
 
-aws eks update-kubeconfig --region us-east-1 --name introspect-cluster
-kubectl get nodes
+# Try kubectl a few times while nodes register
+echo "==> Checking cluster nodes"
+for i in {1..10}; do
+  if kubectl get nodes >/dev/null 2>&1; then
+    kubectl get nodes -o wide
+    break
+  fi
+  echo "   Nodes not ready yet, retrying ($i/10)..."
+  sleep 15
+done
 
 
 # ========= Namespace =========

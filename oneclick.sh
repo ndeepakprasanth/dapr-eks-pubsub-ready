@@ -22,6 +22,25 @@ IMAGE_TAG="${IMAGE_TAG:-$(date -u +%Y%m%d%H%M%S)}"
 echo "==> Using ACCOUNT_ID=$ACCOUNT_ID REGION=$REGION CLUSTER_NAME=$CLUSTER_NAME NAMESPACE=$NAMESPACE"
 aws configure set region "$REGION"
 
+#EKS cluster creation
+
+eksctl create cluster \
+  --name introspect-cluster \
+  --region us-east-1 \
+  --nodegroup-name ng-1 \
+  --node-type t3.medium \
+  --nodes 2 \
+  --nodes-min 1 \
+  --nodes-max 3 \
+  --managed
+
+sleep 60
+
+
+aws eks update-kubeconfig --region us-east-1 --name introspect-cluster
+kubectl get nodes
+
+
 # ========= Namespace =========
 kubectl get ns "$NAMESPACE" >/dev/null 2>&1 || kubectl create ns "$NAMESPACE"
 

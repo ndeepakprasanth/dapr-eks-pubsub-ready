@@ -16,7 +16,7 @@ spec:
       annotations:
         dapr.io/enabled: "true"
         dapr.io/app-id: "orderservice"
-        dapr.io/app-port: "8080"          # Dapr will wait for your app on this port
+        dapr.io/app-port: "8080"
         dapr.io/log-level: "info"
     spec:
       serviceAccountName: order-dapr-irsa
@@ -30,7 +30,7 @@ spec:
             - name: NODE_ENV
               value: "production"
             - name: PORT
-              value: "8080"               # Make sure your app respects this
+              value: "8080"
           ports:
             - containerPort: 8080
 ---
@@ -43,6 +43,5 @@ spec:
     app: orderservice
   ports:
     - name: http
-      port      port: 8080
+      port: 8080
       targetPort: 8080
-

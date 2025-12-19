@@ -1,0 +1,11 @@
+apiVersion: dapr.io/v1alpha1
+kind: Subscription
+metadata:
+  name: orders-sub-products
+  namespace: default
+spec:
+  pubsubname: snssqs-pubsub
+  topic: orders                 # <-- align with ProductService log
+  route: /events/product-updated
+scopes:
+- orderservice

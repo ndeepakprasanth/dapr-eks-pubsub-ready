@@ -5,8 +5,7 @@ metadata:
   namespace: default
 spec:
   type: pubsub.aws.snssqs
-   version: v1
+  version: v1
   metadata:
     - name: region
       value: "us-east-1"
-

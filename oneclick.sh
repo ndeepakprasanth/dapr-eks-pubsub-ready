@@ -7,6 +7,7 @@ ACCOUNT_ID="${ACCOUNT_ID:-}"
 REGION="${REGION:-us-east-1}"
 CLUSTER_NAME="${CLUSTER_NAME:-dapr-eks}"
 NAMESPACE="${NAMESPACE:-dapr-apps}"
+AWS_PROFILE="${AWS_PROFILE:-Deepak}"
 
 # Source dirs (adjust if your repo differs)
 PRODUCT_DIR="${PRODUCT_DIR:-src/productservice}"
@@ -30,7 +31,7 @@ aws configure set region "$REGION"
 
 # ========= EKS cluster creation (idempotent) =========
 echo "==> Checking if EKS cluster '$CLUSTER_NAME' exists in $REGION"
-if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
+if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" --profile "$AWS_PROFILE" >/dev/null 2>&1; then
   echo "   Cluster '$CLUSTER_NAME' already exists. Skipping creation."
 else
   echo "==> Creating EKS cluster '$CLUSTER_NAME' in $REGION"
@@ -45,11 +46,11 @@ else
     --managed
 
   echo "==> Waiting for EKS control plane to become active"
-  aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
+  aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION" --profile "$AWS_PROFILE"
 fi
 
 echo "==> Updating kubeconfig"
-aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME"
+aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME" --profile "$AWS_PROFILE"
 
 # Try kubectl a few times while nodes register
 echo "==> Checking cluster nodes"
@@ -63,11 +64,82 @@ for i in {1..10}; do
 done
 
 
+# ========= EBS CSI Driver (required for PVCs) =========
+echo "==> Installing EBS CSI driver addon"
+# Create IAM role for EBS CSI driver
+OIDC_ISSUER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" --profile "$AWS_PROFILE" --query "cluster.identity.oidc.issuer" --output text | sed 's|https://||')
+OIDC_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}"
+
+# Check if OIDC provider exists, create if not
+if ! aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_ARN" --profile "$AWS_PROFILE" >/dev/null 2>&1; then
+  echo "   Creating OIDC provider: $OIDC_ARN"
+  aws iam create-open-id-connect-provider \
+    --url "https://${OIDC_ISSUER}" \
+    --thumbprint-list 9e99a48a9960b14926bb7f3b02e22da2b0ab7280 \
+    --client-id-list sts.amazonaws.com \
+    --profile "$AWS_PROFILE" >/dev/null
+fi
+
+# Create IAM role for EBS CSI driver
+cat > ebs-csi-trust-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "${OIDC_ISSUER}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa",
+          "${OIDC_ISSUER}:aud": "sts.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
+EOF
+
+aws iam create-role \
+  --role-name AmazonEKS_EBS_CSI_DriverRole \
+  --assume-role-policy-document file://ebs-csi-trust-policy.json \
+  --profile "$AWS_PROFILE" 2>/dev/null || true
+
+aws iam attach-role-policy \
+  --role-name AmazonEKS_EBS_CSI_DriverRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy \
+  --profile "$AWS_PROFILE" 2>/dev/null || true
+
+# Create service account
+kubectl create serviceaccount ebs-csi-controller-sa -n kube-system --dry-run=client -o yaml | \
+kubectl annotate --local -f - eks.amazonaws.com/role-arn=arn:aws:iam::${ACCOUNT_ID}:role/AmazonEKS_EBS_CSI_DriverRole -o yaml | \
+kubectl apply -f - 2>/dev/null || true
+
+# Install EBS CSI addon
+aws eks create-addon \
+  --cluster-name "$CLUSTER_NAME" \
+  --addon-name aws-ebs-csi-driver \
+  --region "$REGION" \
+  --profile "$AWS_PROFILE" \
+  --service-account-role-arn arn:aws:iam::${ACCOUNT_ID}:role/AmazonEKS_EBS_CSI_DriverRole \
+  --resolve-conflicts OVERWRITE >/dev/null 2>&1 || true
+
+echo "==> Waiting for EBS CSI driver to be ready"
+for i in {1..10}; do
+  STATUS=$(aws eks describe-addon --cluster-name "$CLUSTER_NAME" --addon-name aws-ebs-csi-driver --region "$REGION" --profile "$AWS_PROFILE" --query 'addon.status' --output text 2>/dev/null || echo "CREATING")
+  if [[ "$STATUS" == "ACTIVE" ]]; then
+    echo "   EBS CSI driver is active"
+    break
+  fi
+  echo "   EBS CSI driver status: $STATUS, waiting... ($i/10)"
+  sleep 30
+done
+
 # ========= Namespace =========
 kubectl get ns "$NAMESPACE" >/dev/null 2>&1 || kubectl create ns "$NAMESPACE"
-
 # ========= Dapr control plane =========
-# Idempotent Helm repo add/update, then install/upgrade control plane
 if ! helm repo list | awk '{print $1}' | grep -qx dapr; then
   helm repo add dapr https://dapr.github.io/helm-charts
 else
@@ -93,8 +165,9 @@ fi
 
 DAPR_CHART_VERSION="1.16.5"
 HELM_EXTRA_ARGS=""
+DEMO_MODE="${DEMO_MODE:-false}"
 if [ "${DEMO_MODE}" = "true" ]; then
-  echo "DEMO_MODE=true: disabling scheduler persistence for faster installs"
+  echo "DEMO_MODE=true: disabling scheduler persistence (recommended for lab environments)"
   HELM_EXTRA_ARGS="--set scheduler.persistence.enabled=false"
 fi
 
@@ -114,8 +187,7 @@ fi
 
 
 # ========= Enable OIDC provider for IRSA =========
-echo "==> Associating OIDC provider for cluster (required for IRSA)"
-eksctl utils associate-iam-oidc-provider --region "$REGION" --cluster "$CLUSTER_NAME" --approve
+echo "==> OIDC provider already configured in EBS CSI section"
 
 
 # ========= IRSA v2 policy for SNS/SQS =========
@@ -163,12 +235,12 @@ POLICY_NAME="dapr-snssqs-policy-v2"
 echo "==> Ensuring IRSA v2 policy exists"
 NEW_POLICY_ARN=$(aws iam list-policies \
   --query "Policies[?PolicyName=='${POLICY_NAME}'].Arn | [0]" \
-  --output text | head -n1)
+  --output text --profile "$AWS_PROFILE" | head -n1)
 if [[ -z "${NEW_POLICY_ARN}" || "${NEW_POLICY_ARN}" == "None" ]]; then
   NEW_POLICY_ARN=$(aws iam create-policy \
     --policy-name "$POLICY_NAME" \
     --policy-document "file://eks/dapr-snssqs-policy-v2.json" \
-    --query 'Policy.Arn' --output text)
+    --query 'Policy.Arn' --output text --profile "$AWS_PROFILE")
 fi
 echo "   IRSA v2 policy ARN: $NEW_POLICY_ARN"
 
@@ -178,11 +250,11 @@ kubectl apply -f k8s/01-serviceaccount.yaml
 
 # ========= SNS Topic guard (avoid tag mismatch) =========
 echo "==> Deleting existing SNS topic 'orders' (if present)"
-ORDERS_TOPIC_ARN=$(aws sns list-topics --region "$REGION" \
+ORDERS_TOPIC_ARN=$(aws sns list-topics --region "$REGION" --profile "$AWS_PROFILE" \
   --query "Topics[?ends_with(TopicArn, ':orders')].TopicArn | [0]" \
   --output text | head -n1)
 if [[ -n "$ORDERS_TOPIC_ARN" && "$ORDERS_TOPIC_ARN" != "None" ]]; then
-  aws sns delete-topic --topic-arn "$ORDERS_TOPIC_ARN" --region "$REGION" || true
+  aws sns delete-topic --topic-arn "$ORDERS_TOPIC_ARN" --region "$REGION" --profile "$AWS_PROFILE" || true
   echo "   Deleted $ORDERS_TOPIC_ARN"
 fi
 
@@ -202,15 +274,15 @@ PRODUCT_IMAGE="${ECR}/${PRODUCT_REPO}:${IMAGE_TAG}"
 ORDER_IMAGE="${ECR}/${ORDER_REPO}:${IMAGE_TAG}"
 
 echo "==> ECR login"
-aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR"
+aws ecr get-login-password --region "$REGION" --profile "$AWS_PROFILE" | docker login --username AWS --password-stdin "$ECR"
 
 echo "==> Ensure ECR repos exist"
-aws ecr describe-repositories --repository-names "$PRODUCT_REPO" >/dev/null 2>&1 || \
+aws ecr describe-repositories --repository-names "$PRODUCT_REPO" --profile "$AWS_PROFILE" >/dev/null 2>&1 || \
   aws ecr create-repository --repository-name "$PRODUCT_REPO" \
-    --image-scanning-configuration scanOnPush=true >/dev/null
-aws ecr describe-repositories --repository-names "$ORDER_REPO" >/dev/null 2>&1 || \
+    --image-scanning-configuration scanOnPush=true --profile "$AWS_PROFILE" >/dev/null
+aws ecr describe-repositories --repository-names "$ORDER_REPO" --profile "$AWS_PROFILE" >/dev/null 2>&1 || \
   aws ecr create-repository --repository-name "$ORDER_REPO" \
-    --image-scanning-configuration scanOnPush=true >/dev/null
+    --image-scanning-configuration scanOnPush=true --profile "$AWS_PROFILE" >/dev/null
 
 echo "==> Building & pushing ProductService -> $PRODUCT_IMAGE"
 test -f "${PRODUCT_DIR}/Dockerfile" || { echo "Missing ${PRODUCT_DIR}/Dockerfile"; exit 1; }

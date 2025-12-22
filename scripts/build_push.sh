@@ -13,11 +13,11 @@ if [[ -z "$ACCID" ]]; then echo "Provide AWS Account ID as first arg"; exit 1; f
 ECR="${ACCID}.dkr.ecr.${REGION}.amazonaws.com"
 
 # Create repos if not exist (flat names)
-aws ecr describe-repositories --repository-names productservice >/dev/null 2>&1 || aws ecr create-repository --repository-name productservice >/dev/null
-aws ecr describe-repositories --repository-names orderservice  >/dev/null 2>&1 || aws ecr create-repository --repository-name orderservice >/dev/null
+aws ecr describe-repositories --repository-names productservice --profile Deepak >/dev/null 2>&1 || aws ecr create-repository --repository-name productservice --profile Deepak >/dev/null
+aws ecr describe-repositories --repository-names orderservice --profile Deepak  >/dev/null 2>&1 || aws ecr create-repository --repository-name orderservice --profile Deepak >/dev/null
 
 # Login to ECR
-aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin ${ECR}
+aws ecr get-login-password --region ${REGION} --profile Deepak | docker login --username AWS --password-stdin ${ECR}
 
 # Detect platform
 PLATFORM="linux/amd64"

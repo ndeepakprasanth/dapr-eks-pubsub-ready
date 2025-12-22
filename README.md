@@ -24,6 +24,7 @@ This repo provides a **complete, working** implementation of containerized micro
 - kubectl, eksctl, Helm 3+, Docker installed
 - Node.js 20+ (for local development)
 - Your AWS Account ID
+- Run `./check-prerequisites.sh` to validate setup
 
 ## Quick Start
 
@@ -32,6 +33,9 @@ This repo provides a **complete, working** implementation of containerized micro
 ```bash
 # Set your AWS Account ID and run
 ACCOUNT_ID=123456789012 ./oneclick.sh
+
+# Or with custom AWS profile
+ACCOUNT_ID=123456789012 AWS_PROFILE=YourProfile ./oneclick.sh
 ```
 
 ### Option 2: Step-by-step

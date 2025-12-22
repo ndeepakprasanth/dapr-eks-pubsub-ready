@@ -8,10 +8,7 @@ set -euo pipefail
 CLUSTER_NAME="${CLUSTER_NAME:-dapr-eks}"
 REGION="${REGION:-us-east-1}"
 K8S_NAMESPACE="${K8S_NAMESPACE:-dapr-apps}"
-EKS_DIR="${EKS_DIR:-eks}"
-ECR_DIR="${ECR_DIR:-ecr}"
-DAPR_DIR="${DAPR_DIR:-dapr}"
-K8S_DIR="${K8S_DIR:-k8s}"
+AWS_PROFILE="${AWS_PROFILE:-Deepak}"
 FORCE="${FORCE:-0}"   # set to 1 or pass --yes to skip confirmation
 
 # =========================
@@ -33,24 +30,20 @@ while [[ "${1:-}" != "" ]]; do
 done
 
 # Pre-checks
-for cmd in aws eksctl kubectl helm docker; do
+for cmd in aws kubectl; do
   command -v "$cmd" >/dev/null || die "Missing dependency: $cmd"
 done
 
-ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+ACCOUNT_ID="$(aws sts get-caller-identity --profile $AWS_PROFILE --query Account --output text)"
 
 log "Planned deletions in account ${ACCOUNT_ID}, region ${REGION}:"
 cat <<EOF
-- Kubernetes app resources in namespace '${K8S_NAMESPACE}':
-  * Deployments/Services: productservice, orderservice
-  * Dapr Component: snssqs-pubsub
-  * Dapr Subscription: orders-sub-products
-  * ServiceAccount (IRSA): order-dapr-irsa
+- Kubernetes app resources in namespace '${K8S_NAMESPACE}'
 - Dapr control plane (Helm release 'dapr') + namespace 'dapr-system'
-- EKS add-on: aws-ebs-csi-driver
+- EKS cluster: ${CLUSTER_NAME} (including nodegroups)
 - ECR repositories: productservice, orderservice (with images)
-- IAM policy: 'dapr-snssqs-policy' (detaching if needed)
-- EKS cluster: ${CLUSTER_NAME}
+- IAM role: AmazonEKS_EBS_CSI_DriverRole
+- OIDC provider for the cluster
 EOF
 
 if [[ "$FORCE" != "1" ]]; then
@@ -61,71 +54,51 @@ fi
 # =========================
 # 1) KUBERNETES APP RESOURCES
 # =========================
-log "Deleting app Deployments/Services (productservice, orderservice)…"
-kubectl delete -f "$K8S_DIR/productservice.yaml" --ignore-not-found || true
-kubectl delete -f "$K8S_DIR/orderservice.yaml" --ignore-not-found || true
-
-log "Deleting Dapr Subscription and Component…"
-kubectl delete -f "$DAPR_DIR/subscription-orders.yaml" --ignore-not-found || true
-kubectl delete -f "$DAPR_DIR/pubsub-snssqs.yaml" --ignore-not-found || true
-
-log "Deleting IRSA ServiceAccount (K8s) if present…"
-kubectl delete sa order-dapr-irsa -n "$K8S_NAMESPACE" --ignore-not-found || true
+log "Deleting app namespaces and resources…"
+kubectl delete namespace "$K8S_NAMESPACE" --force --grace-period=0 2>/dev/null || true
+kubectl delete namespace dapr-system --force --grace-period=0 2>/dev/null || true
 
 # =========================
-# 2) DAPR CONTROL PLANE
-# =========================
-log "Uninstalling Dapr control plane (Helm)…"
-helm uninstall dapr -n dapr-system || true
-kubectl delete ns dapr-system --ignore-not-found || true
-
-# =========================
-# 3) EKS ADD-ON (EBS CSI)
-# =========================
-log "Deleting EKS add-on 'aws-ebs-csi-driver'…"
-aws eks delete-addon --cluster-name "${CLUSTER_NAME}" \
-  --addon-name aws-ebs-csi-driver --region "${REGION}" \
-  >/dev/null 2>&1 || true
-
-# =========================
-# 4) IRSA ROLE (IAM) AND POLICY
-# =========================
-log "Deleting IRSA (IAM role + K8s SA) via eksctl (safe teardown)…"
-eksctl delete iamserviceaccount \
-  --name order-dapr-irsa \
-  --namespace "${K8S_NAMESPACE}" \
-  --cluster "${CLUSTER_NAME}" \
-  --region "${REGION}" || true
-
-# Detach and delete IAM policy created for SNS/SQS
-POLICY_ARN="$(aws iam list-policies \
-  --query "Policies[?PolicyName=='dapr-snssqs-policy'].Arn | [0]" --output text)"
-if [[ -n "$POLICY_ARN" && "$POLICY_ARN" != "None" ]]; then
-  log "Detaching and deleting IAM policy 'dapr-snssqs-policy' (${POLICY_ARN})…"
-  ROLES=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" \
-    --query 'PolicyRoles[].RoleName' --output text || true)
-  for ROLE in $ROLES; do
-    aws iam detach-role-policy --role-name "$ROLE" --policy-arn "$POLICY_ARN" || true
-  done
-  aws iam delete-policy --policy-arn "$POLICY_ARN" || true
-else
-  warn "IAM policy 'dapr-snssqs-policy' not found or already deleted."
-fi
-
-# =========================
-# 5) ECR REPOSITORIES
+# 2) ECR REPOSITORIES
 # =========================
 log "Deleting ECR repositories (force: deletes images)…"
 for REPO in productservice orderservice; do
   aws ecr delete-repository --repository-name "$REPO" \
-    --region "${REGION}" --force >/dev/null 2>&1 || warn "ECR repo '$REPO' not found."
+    --region "${REGION}" --profile "$AWS_PROFILE" --force >/dev/null 2>&1 || warn "ECR repo '$REPO' not found."
 done
 
 # =========================
-# 6) EKS CLUSTER
+# 3) EKS CLUSTER DELETION
 # =========================
-log "Deleting EKS cluster '${CLUSTER_NAME}' (this can take several minutes)…"
-eksctl delete cluster --name "${CLUSTER_NAME}" --region "${REGION}" --wait || true
+log "Deleting EKS nodegroups first…"
+NODEGROUPS=$(aws eks list-nodegroups --cluster-name "$CLUSTER_NAME" --region "$REGION" --profile "$AWS_PROFILE" --query 'nodegroups' --output text 2>/dev/null || echo "")
+for NG in $NODEGROUPS; do
+  if [[ -n "$NG" && "$NG" != "None" ]]; then
+    log "Deleting nodegroup: $NG"
+    aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name "$NG" --region "$REGION" --profile "$AWS_PROFILE" >/dev/null 2>&1 || true
+    aws eks wait nodegroup-deleted --cluster-name "$CLUSTER_NAME" --nodegroup-name "$NG" --region "$REGION" --profile "$AWS_PROFILE" 2>/dev/null || true
+  fi
+done
+
+log "Deleting EKS cluster '${CLUSTER_NAME}'…"
+aws eks delete-cluster --name "${CLUSTER_NAME}" --region "${REGION}" --profile "$AWS_PROFILE" >/dev/null 2>&1 || warn "Cluster not found or already deleted"
+
+# =========================
+# 4) IAM RESOURCES CLEANUP
+# =========================
+log "Cleaning up IAM resources…"
+# Detach and delete EBS CSI IAM role
+aws iam detach-role-policy --role-name AmazonEKS_EBS_CSI_DriverRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy --profile "$AWS_PROFILE" 2>/dev/null || true
+aws iam delete-role --role-name AmazonEKS_EBS_CSI_DriverRole --profile "$AWS_PROFILE" 2>/dev/null || true
+
+# Delete OIDC provider
+OIDC_PROVIDERS=$(aws iam list-open-id-connect-providers --profile "$AWS_PROFILE" --query 'OpenIDConnectProviderList[].Arn' --output text 2>/dev/null || echo "")
+for PROVIDER in $OIDC_PROVIDERS; do
+  if [[ "$PROVIDER" == *"eks"* ]]; then
+    aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "$PROVIDER" --profile "$AWS_PROFILE" 2>/dev/null || true
+    log "Deleted OIDC provider: $PROVIDER"
+  fi
+done
 
 # Optional: clean local kube context (best-effort)
 CTX_NAME="$(kubectl config get-contexts -o name | grep -E "${CLUSTER_NAME}" || true)"

@@ -3,10 +3,10 @@
 set -euo pipefail
 
 # ========= CONFIG =========
-ACCOUNT_ID="${ACCOUNT_ID:-946248011760}"
+ACCOUNT_ID="${ACCOUNT_ID:-}"
 REGION="${REGION:-us-east-1}"
 CLUSTER_NAME="${CLUSTER_NAME:-dapr-eks}"
-NAMESPACE="${NAMESPACE:-default}"
+NAMESPACE="${NAMESPACE:-dapr-apps}"
 
 # Source dirs (adjust if your repo differs)
 PRODUCT_DIR="${PRODUCT_DIR:-src/productservice}"
@@ -20,6 +20,11 @@ ORDER_REPO="${ORDER_REPO:-orderservice}"
 IMAGE_TAG="${IMAGE_TAG:-$(date -u +%Y%m%d%H%M%S)}"
 
 echo "==> Using ACCOUNT_ID=$ACCOUNT_ID REGION=$REGION CLUSTER_NAME=$CLUSTER_NAME NAMESPACE=$NAMESPACE"
+if [[ -z "$ACCOUNT_ID" ]]; then
+  echo "ERROR: ACCOUNT_ID is required. Set it as environment variable or pass as argument."
+  echo "Usage: ACCOUNT_ID=123456789012 ./oneclick.sh"
+  exit 1
+fi
 aws configure set region "$REGION"
 
 
@@ -69,12 +74,43 @@ else
   helm repo add dapr https://dapr.github.io/helm-charts --force-update
 fi
 helm repo update
+DEMO_MODE="${DEMO_MODE:-false}"
+# Ensure a default StorageClass exists (try to use gp2, otherwise apply bundled ebs-gp3)
+echo "==> Checking for default StorageClass"
+DEFAULT_SC=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' 2>/dev/null || true)
+if [ -z "${DEFAULT_SC}" ]; then
+  echo "No default StorageClass found. Attempting to set gp2 as default or create ebs-gp3."
+  if kubectl get storageclass gp2 >/dev/null 2>&1; then
+    echo "Setting gp2 as the default StorageClass"
+    kubectl patch storageclass gp2 -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' || true
+  else
+    echo "Applying eks/ebs-gp3-sc.yaml"
+    kubectl apply -f eks/ebs-gp3-sc.yaml || true
+  fi
+else
+  echo "Found default StorageClass: ${DEFAULT_SC}"
+fi
 
-echo "==> Installing/Upgrading Dapr control plane"
-helm upgrade --install dapr dapr/dapr \
+DAPR_CHART_VERSION="1.16.5"
+HELM_EXTRA_ARGS=""
+if [ "${DEMO_MODE}" = "true" ]; then
+  echo "DEMO_MODE=true: disabling scheduler persistence for faster installs"
+  HELM_EXTRA_ARGS="--set scheduler.persistence.enabled=false"
+fi
+
+echo "==> Installing/Upgrading Dapr control plane (chart version: ${DAPR_CHART_VERSION})"
+if ! helm upgrade --install dapr dapr/dapr \
   --namespace dapr-system \
   --create-namespace \
-  --wait
+  --version "${DAPR_CHART_VERSION}" \
+  ${HELM_EXTRA_ARGS} \
+  --wait --atomic --timeout 15m0s; then
+  echo "Helm install/upgrade for Dapr failed — gathering diagnostics"
+  kubectl -n dapr-system get pods -o wide || true
+  kubectl -n dapr-system describe pod -l app.kubernetes.io/name=dapr || true
+  kubectl -n dapr-system get pvc || true
+  exit 1
+fi
 
 
 # ========= Enable OIDC provider for IRSA =========
@@ -136,37 +172,9 @@ if [[ -z "${NEW_POLICY_ARN}" || "${NEW_POLICY_ARN}" == "None" ]]; then
 fi
 echo "   IRSA v2 policy ARN: $NEW_POLICY_ARN"
 
-# ========= IRSA ServiceAccounts (adjust role-arn if needed) =========
-cat > sa-irsa.yaml <<YAML
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: product-dapr-irsa
-  namespace: ${NAMESPACE}
-  annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::${ACCOUNT_ID}:role/product-dapr-irsa-role
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: order-dapr-irsa
-  namespace: ${NAMESPACE}
-  annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::${ACCOUNT_ID}:role/order-dapr-irsa-role
-YAML
-kubectl apply -f sa-irsa.yaml
-
-# Attach policy to both IRSA roles (if present)
-echo "==> Attaching policy to Product & Order roles (if present)"
-for ROLE_ARN in \
-  "$(kubectl get sa product-dapr-irsa -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' || true)" \
-  "$(kubectl get sa order-dapr-irsa   -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' || true)"; do
-  if [[ -n "$ROLE_ARN" && "$ROLE_ARN" != "None" ]]; then
-    ROLE_NAME="${ROLE_ARN##*/}"
-    aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn "$NEW_POLICY_ARN" || true
-    echo "   Attached $POLICY_NAME to $ROLE_NAME"
-  fi
-done
+# ========= IRSA ServiceAccounts =========
+kubectl apply -f k8s/00-namespace.yaml
+kubectl apply -f k8s/01-serviceaccount.yaml
 
 # ========= SNS Topic guard (avoid tag mismatch) =========
 echo "==> Deleting existing SNS topic 'orders' (if present)"
@@ -179,20 +187,7 @@ if [[ -n "$ORDERS_TOPIC_ARN" && "$ORDERS_TOPIC_ARN" != "None" ]]; then
 fi
 
 # ========= Dapr AWS SNS/SQS component =========
-cat > dapr-snssqs-component.yaml <<YAML
-apiVersion: dapr.io/v1alpha1
-kind: Component
-metadata:
-  name: snssqs-pubsub
-  namespace: ${NAMESPACE}
-spec:
-  type: pubsub.aws.snssqs
-  version: v1
-  metadata:
-    - name: region
-      value: "${REGION}"
-YAML
-kubectl apply -f dapr-snssqs-component.yaml
+kubectl apply -f dapr/snssqs-pubsub.yaml
 
 # ========= Build & Push Images (automatic) =========
 
@@ -225,114 +220,29 @@ echo "==> Building & pushing OrderService   -> $ORDER_IMAGE"
 test -f "${ORDER_DIR}/Dockerfile" || { echo "Missing ${ORDER_DIR}/Dockerfile"; exit 1; }
 docker buildx build --platform "$PLATFORM" -t "$ORDER_IMAGE" -f "${ORDER_DIR}/Dockerfile" "${ORDER_DIR}" --push
 
-# ========= App Deployments (wired with computed images) =========
-cat > k8s-apps.yaml <<YAML
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: productservice
-  namespace: ${NAMESPACE}
-  labels:
-    app: productservice
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: productservice
-  template:
-    metadata:
-      labels:
-        app: productservice
-      annotations:
-        dapr.io/enabled: "true"
-        dapr.io/app-id: "productservice"
-        dapr.io/app-port: "8080"
-        dapr.io/listen-addresses: "0.0.0.0"
-        dapr.io/sidecar-listen-addresses: "0.0.0.0"
-        dapr.io/log-level: "info"
-    spec:
-      serviceAccountName: product-dapr-irsa
-      containers:
-      - name: productservice
-        image: ${PRODUCT_IMAGE}
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 8080
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: orderservice
-  namespace: ${NAMESPACE}
-  labels:
-    app: orderservice
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: orderservice
-  template:
-    metadata:
-      labels:
-        app: orderservice
-      annotations:
-        dapr.io/enabled: "true"
-        dapr.io/app-id: "orderservice"
-        dapr.io/app-port: "8090"
-        dapr.io/listen-addresses: "0.0.0.0"
-        dapr.io/sidecar-listen-addresses: "0.0.0.0"
-        dapr.io/log-level: "info"
-    spec:
-      serviceAccountName: order-dapr-irsa
-      containers:
-      - name: orderservice
-        image: ${ORDER_IMAGE}
-        imagePullPolicy: Always
-        env:
-        - name: PORT
-          value: "8090"
-        ports:
-        - containerPort: 8090
-YAML
-kubectl apply -f k8s-apps.yaml
+# ========= App Deployments =========
+kubectl apply -f k8s/10-productservice.yaml -f k8s/11-orderservice.yaml
 
-# ========= Subscription (route matches /orders handler) =========
-cat > dapr-subscription.yaml <<YAML
-apiVersion: dapr.io/v2alpha1
-kind: Subscription
-metadata:
-  name: orders-sub-products
-  namespace: ${NAMESPACE}
-scopes:
-- orderservice
-spec:
-  pubsubname: snssqs-pubsub
-  topic: orders
-  routes:
-    default: /orders
-YAML
-kubectl apply -f dapr-subscription.yaml
+# ========= Subscription =========
+kubectl apply -f dapr/subscription-orders.yaml
 
 echo "==> Waiting for Product & Order deployments"
 kubectl wait --for=condition=Available deployment/productservice -n "$NAMESPACE" --timeout=300s || true
 kubectl wait --for=condition=Available deployment/orderservice   -n "$NAMESPACE" --timeout=300s || true
 kubectl get pods -n "$NAMESPACE" -o wide || true
 
-# ========= Publish test (call sidecar port 3500) =========
-echo "==> Publishing test message via productservice Dapr sidecar"
-kubectl delete pod curl-test wget-test -n "$NAMESPACE" --ignore-not-found || true
-
-kubectl run curl-test -n "$NAMESPACE" --restart=Never \
+# ========= Test the deployment =========
+echo "==> Testing pub/sub functionality"
+kubectl run test-curl -n "$NAMESPACE" --restart=Never \
   --image=curlimages/curl:8.10.1 \
-  --command -- sh -lc \
-  'curl -v -i -s -X POST "http://productservice-dapr:3500/v1.0/publish/snssqs-pubsub/orders" \
-     -H "Content-Type: application/json" \
-     -d "{\"id\":\"bootstrap\",\"name\":\"OneClick\",\"price\":1.00,\"updatedAt\":\"$(date -u +%FT%TZ)\"}" && sleep 1' || true
+  --rm -i --command -- \
+  curl -X POST "http://productservice:8080/publish" \
+    -H "Content-Type: application/json" \
+    -d '{"orderId": 123, "item":"test-item", "price": 99.99}'
 
-kubectl logs curl-test -n "$NAMESPACE" || true
-kubectl delete pod curl-test -n "$NAMESPACE" --wait=false 2>/dev/null || true
+echo -e "\n==> OrderService logs:"
+kubectl logs deploy/orderservice -n "$NAMESPACE" --tail=10 || true
 
-echo "==> OrderService logs (app + sidecar)"
-kubectl logs deploy/orderservice -n "$NAMESPACE" --tail=100 || true
-kubectl logs deploy/orderservice -n "$NAMESPACE" -kubectl logs deploy/orderservice -n "$NAMESPACE" -c daprd --tail=100 || true
+echo -e "\n==> Deployment complete! Check pod status:"
+kubectl get pods -n "$NAMESPACE" -o wide
 

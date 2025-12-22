@@ -5,9 +5,9 @@ set -euo pipefail
 # =========================
 # CONFIGURE / OVERRIDES
 # =========================
-CLUSTER_NAME="${CLUSTER_NAME:-introspect-cluster}"
+CLUSTER_NAME="${CLUSTER_NAME:-dapr-eks}"
 REGION="${REGION:-us-east-1}"
-K8S_NAMESPACE="${K8S_NAMESPACE:-default}"
+K8S_NAMESPACE="${K8S_NAMESPACE:-dapr-apps}"
 EKS_DIR="${EKS_DIR:-eks}"
 ECR_DIR="${ECR_DIR:-ecr}"
 DAPR_DIR="${DAPR_DIR:-dapr}"

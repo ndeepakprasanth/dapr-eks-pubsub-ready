@@ -21,7 +21,7 @@ spec:
       serviceAccountName: dapr-pubsub-sa
       containers:
       - name: orderservice
-        image: 946248011760.dkr.ecr.us-east-1.amazonaws.com/dapr-eks-pubsub/orderservice:latest
+        image: <ECR_URI>/orderservice:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8090

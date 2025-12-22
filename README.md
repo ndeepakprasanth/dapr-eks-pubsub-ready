@@ -1,69 +1,79 @@
 
-# Dapr on EKS with AWS SNS/SQS Pub/Sub (IRSA)
+# Dapr on EKS with AWS SNS/SQS Pub/Sub
+**Author**: Deepak  
+**Project**: Containerized Microservices on Amazon EKS with Dapr Sidecars
 
-This repo gives you a **minimal, working** implementation for your Introspect 1B:
+This repo provides a **complete, working** implementation of containerized microservices on Amazon EKS with Dapr sidecars for pub/sub messaging:
 
 - 2 Node.js microservices:
   - **ProductService** (publisher) → publishes to topic `orders` via Dapr
   - **OrderService** (subscriber) → receives events from Dapr via declarative Subscription
 - Dapr installed on EKS via Helm
-- Dapr **AWS SNS/SQS** pub/sub component configured for **IRSA** (no static AWS keys)
+- Dapr **AWS SNS/SQS** pub/sub component configured
 - Docker images pushed to **Amazon ECR**
-- One-click scripts to create the cluster, build/push, deploy and test
+- One-click deployment script
 
-> Default region is **us-east-1**. Change in `dapr/snssqs-pubsub.yaml` and scripts if needed.
+> Default region is **us-east-1**. Change in scripts if needed.
 
 ---
 
-## 0) Prereqs
+## Prerequisites
+**Author**: Deepak
 
-- AWS CLI, kubectl, eksctl, Helm, Docker
-- Logged in to the right AWS account; `aws configure set region us-east-1`
-- Node.js 20+ for local tests
+- AWS CLI configured with appropriate permissions
+- kubectl, eksctl, Helm 3+, Docker installed
+- Node.js 20+ (for local development)
+- Your AWS Account ID
 
-## 1) Create EKS (with OIDC + IRSA service account)
+## Quick Start
 
-```bash
-# from repo root
-./eks/create-cluster.sh <AWS_ACCOUNT_ID>
-```
-
-This uses `eksctl` to create a basic EKS cluster (1.29), enables **OIDC**, and creates an **IRSA** service account `dapr-pubsub-sa` in namespace `dapr-apps` with an IAM role that has SNS/SQS permissions.
-
-## 2) Build and push images to ECR
+### Option 1: One-click deployment
 
 ```bash
-./scripts/build_push.sh <AWS_ACCOUNT_ID> us-east-1 dapr-eks-pubsub
+# Set your AWS Account ID and run
+ACCOUNT_ID=123456789012 ./oneclick.sh
 ```
 
-The script also replaces `<ECR_URI>` placeholders in `k8s/*` manifests.
+### Option 2: Step-by-step
 
-## 3) Deploy Dapr + components + apps
+1. **Build and push images to ECR:**
+```bash
+./scripts/build_push.sh <YOUR_AWS_ACCOUNT_ID>
+```
 
+2. **Deploy to EKS:**
 ```bash
 ./scripts/deploy.sh
 ```
 
-This will:
-- Install **Dapr** via Helm (namespace `dapr-system`)
-- Create namespace + SA
-- Apply the **AWS SNS/SQS** Dapr component and **Subscription**
-- Deploy **ProductService** and **OrderService**, then publish a test event
+## Test the deployment
 
-Verify subscriber logs:
 ```bash
-kubectl -n dapr-apps logs deploy/orderservice
+# Test pub/sub functionality
+kubectl -n dapr-apps run test-curl --rm -i --restart=Never \
+  --image=curlimages/curl:8.10.1 -- \
+  curl -X POST http://productservice:8080/publish \
+    -H 'Content-Type: application/json' \
+    -d '{"orderId": 123, "item":"laptop", "price": 999.99}'
+
+# Check logs
+kubectl -n dapr-apps logs deploy/orderservice --tail=10
 ```
 
-## 4) Manual test
+## Verify deployment
 
 ```bash
-# Port-forward ProductService
-kubectl -n dapr-apps port-forward deploy/productservice 18080:8080
-# Publish a message
-curl -X POST http://localhost:18080/publish   -H 'Content-Type: application/json'   -d '{"orderId": 42, "item":"book"}'
-# Check OrderService logs
-kubectl -n dapr-apps logs deploy/orderservice -f
+# Check pods (should show 2/2 Ready)
+kubectl -n dapr-apps get pods -o wide
+
+# Check services
+kubectl -n dapr-apps get svc
+
+# Check Dapr components
+kubectl -n dapr-apps get components
+
+# View ECR repositories
+aws ecr describe-repositories --region us-east-1
 ```
 
 ## Deliverables mapping
@@ -119,3 +129,49 @@ flowchart LR
 ---
 
 **Author**: Generated on 2025-12-18T21:05:18.977712Z
+
+**StorageClass / Demo Mode**
+
+- The Dapr scheduler StatefulSet requires PersistentVolumeClaims. Ensure a default StorageClass is present in your cluster so PVCs are dynamically provisioned (for example `gp2` or `ebs-gp3`).
+- For quick demos or CI where provisioning EBS volumes is undesirable, set `DEMO_MODE=true` before running the installer to disable scheduler persistence:
+
+```bash
+DEMO_MODE=true ./oneclick.sh
+```
+
+The repo includes an example StorageClass at `eks/ebs-gp3-sc.yaml` that will be applied automatically by the scripts if no default StorageClass is detected.
+
+## Project Structure
+**Author**: Deepak
+
+```
+.
+├── src/
+│   ├── productservice/     # Publisher microservice
+│   └── orderservice/       # Subscriber microservice
+├── k8s/                    # Kubernetes manifests
+├── dapr/                   # Dapr components
+├── scripts/                # Build and deploy scripts
+├── oneclick.sh            # Complete deployment script
+├── test.sh                # Test script
+└── README.md
+```
+
+## Assignment Deliverables ✅
+**Author**: Deepak
+
+- ✅ **Source Code** → `src/productservice`, `src/orderservice`
+- ✅ **Dockerfiles** → in each service folder
+- ✅ **Container Images in ECR** → created by build scripts
+- ✅ **Kubernetes YAML** → `k8s/*.yaml`
+- ✅ **Dapr Components** → `dapr/snssqs-pubsub.yaml`
+- ✅ **EKS Deployment** → automated via scripts
+- ✅ **Working Pub/Sub** → ProductService → OrderService flow
+- ✅ **Screenshots & Logs** → use `./test.sh` for output
+
+## Troubleshooting
+
+- **ImagePullBackOff?** Run `./scripts/build_push.sh <ACCOUNT_ID>` first
+- **CrashLoopBackOff?** Check architecture with `kubectl get nodes -o wide`
+- **No messages?** Verify components: `kubectl -n dapr-apps get components`
+- **AWS permissions?** Ensure your AWS CLI has ECR/EKS permissions

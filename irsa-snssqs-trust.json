@@ -4,13 +4,13 @@
     {
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::946248011760:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/B57CEA454A59CAFED3601D6B0613884E"
+        "Federated": "arn:aws:iam::946248011760:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/360CEB851468527036D6EFBE50C7D5E1"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
         "StringEquals": {
-          "oidc.eks.us-east-1.amazonaws.com/id/B57CEA454A59CAFED3601D6B0613884E:aud": "sts.amazonaws.com",
-          "oidc.eks.us-east-1.amazonaws.com/id/B57CEA454A59CAFED3601D6B0613884E:sub": "system:serviceaccount:dapr-apps:dapr-pubsub-sa"
+          "oidc.eks.us-east-1.amazonaws.com/id/360CEB851468527036D6EFBE50C7D5E1:aud": "sts.amazonaws.com",
+          "oidc.eks.us-east-1.amazonaws.com/id/360CEB851468527036D6EFBE50C7D5E1:sub": "system:serviceaccount:dapr-apps:dapr-pubsub-sa"
         }
       }
     }

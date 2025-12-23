@@ -2,12 +2,10 @@ apiVersion: dapr.io/v1alpha1
 kind: Subscription
 metadata:
   name: orders-sub-products
-  namespace: dapr-apps
+  namespace: default
 spec:
   pubsubname: snssqs-pubsub
-  topic: orders
-  # v1alpha1 expects a single route key for default delivery
-  route: /orders
+  topic: orders                 # <-- align with ProductService log
+  route: /events/product-updated
 scopes:
 - orderservice
-

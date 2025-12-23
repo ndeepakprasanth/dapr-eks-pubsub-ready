@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Federated": "arn:aws:iam::946248011760:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/ECA05E023B081D52317D1C36749F6A0A" },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "oidc.eks.us-east-1.amazonaws.com/id/ECA05E023B081D52317D1C36749F6A0A:aud": "sts.amazonaws.com",
+          "oidc.eks.us-east-1.amazonaws.com/id/ECA05E023B081D52317D1C36749F6A0A:sub": "system:serviceaccount:dapr-apps:dapr-pubsub-sa"
+        }
+      }
+    }
+  ]
+}

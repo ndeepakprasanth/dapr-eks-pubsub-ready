@@ -11,6 +11,25 @@ kubectl -n dapr-apps run test-curl --rm -i --restart=Never \
     -H 'Content-Type: application/json' \
     -d '{"orderId": 999, "item":"test-laptop", "price": 1299.99}'
 
+
+# Wait and verify delivery in OrderService logs
+echo "==> Verifying delivery in OrderService logs..."
+DELIVERY_FOUND=0
+for i in {1..10}; do
+  if kubectl -n dapr-apps logs deploy/orderservice --tail=50 | grep -q "OrderService received event:"; then
+    echo "Delivery OK: OrderService received the event."
+    DELIVERY_FOUND=1
+    break
+  fi
+  sleep 2
+done
+
+if [[ $DELIVERY_FOUND -eq 0 ]]; then
+  echo "Delivery NOT seen in recent logs."
+  exit 1
+fi
+
+
 echo -e "\n==> OrderService logs:"
 kubectl -n dapr-apps logs deploy/orderservice --tail=10
 

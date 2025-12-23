@@ -1,5 +1,6 @@
 
 #!/usr/bin/env bash
+cd "$(dirname "$0")"
 set -euo pipefail
 
 # ========= CONFIG =========
@@ -193,37 +194,61 @@ if ! helm upgrade --install dapr dapr/dapr \
   exit 1
 fi
 
+# ========= IRSA ServiceAccounts =========
+kubectl apply -f k8s/00-namespace.yaml
+kubectl apply -f k8s/01-serviceaccount.yaml
 
-# ========= IRSA for Dapr SNS/SQS pubsub (ServiceAccount: dapr-pubsub-sa) =========
-echo "==> Configuring IRSA role for dapr-pubsub-sa"
 
-# Resolve cluster OIDC issuer (no https://)
-OIDC_ISSUER=$(aws eks describe-cluster \
-  --name "$CLUSTER_NAME" \
-  --region "$REGION" \
-  --profile "$AWS_PROFILE" \
-  --query "cluster.identity.oidc.issuer" \
-  --output text | sed 's|https://||')
+# ========= IRSA REBIND (ensure trust matches current OIDC issuer & SA is annotated) =========
+echo "==> (IRSA) Rebinding role trust to current EKS OIDC issuer & annotating SA"
 
+ACCOUNT_ID="${ACCOUNT_ID}"
+AWS_PROFILE="${AWS_PROFILE:-Deepak}"
+REGION="${REGION:-us-east-1}"
 ROLE_NAME="DaprSNS_SQS_PubSubRole"
-ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" \
-  --query 'Role.Arn' --output text --profile "$AWS_PROFILE" 2>/dev/null || echo "")
+SA_NS="${NAMESPACE:-dapr-apps}"
+SA_NAME="dapr-pubsub-sa"
 
-if [[ -z "$ROLE_ARN" || "$ROLE_ARN" == "None" ]]; then
-  cat > irsa-snssqs-trust.json <<JSON
+
+
+# Ensure namespace & ServiceAccount exist (idempotent)
+kubectl get ns "${SA_NS}" >/dev/null 2>&1 || kubectl create ns "${SA_NS}"
+kubectl get sa "${SA_NAME}" -n "${SA_NS}" >/dev/null 2>&1 || kubectl create sa "${SA_NAME}" -n "${SA_NS}"
+
+
+# 1) Resolve the current cluster OIDC issuer
+OIDC_ISSUER_URL=$(aws eks describe-cluster \
+  --name "${CLUSTER_NAME}" \
+  --region "${REGION}" \
+  --profile "${AWS_PROFILE}" \
+  --query "cluster.identity.oidc.issuer" \
+  --output text)
+
+OIDC_ISSUER=${OIDC_ISSUER_URL#https://}
+
+# 2) Ensure the IAM OIDC provider exists for this issuer (create if missing)
+OIDC_PROVIDER_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}"
+aws iam get-open-id-connect-provider \
+  --open-id-connect-provider-arn "${OIDC_PROVIDER_ARN}" \
+  --profile "${AWS_PROFILE}" >/dev/null 2>&1 || aws iam create-open-id-connect-provider \
+  --url "${OIDC_ISSUER_URL}" \
+  --thumbprint-list 9e99a48a9960b14926bb7f3b02e22da2b0ab7280 \
+  --client-id-list sts.amazonaws.com \
+  --profile "${AWS_PROFILE}"
+
+# 3) Update the IRSA role trust policy to match THIS issuer & SA (idempotent)
+cat > irsa-updated-trust.json <<JSON
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}"
-      },
+      "Principal": { "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}" },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
         "StringEquals": {
           "${OIDC_ISSUER}:aud": "sts.amazonaws.com",
-          "${OIDC_ISSUER}:sub": "system:serviceaccount:dapr-apps:dapr-pubsub-sa"
+          "${OIDC_ISSUER}:sub": "system:serviceaccount:${SA_NS}:${SA_NAME}"
         }
       }
     }
@@ -231,25 +256,74 @@ if [[ -z "$ROLE_ARN" || "$ROLE_ARN" == "None" ]]; then
 }
 JSON
 
-  echo "   Creating IAM role: $ROLE_NAME"
-  aws iam create-role \
-    --role-name "$ROLE_NAME" \
-    --assume-role-policy-document file://irsa-snssqs-trust.json \
-    --profile "$AWS_PROFILE" >/dev/null
-  ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" \
-    --query 'Role.Arn' --output text --profile "$AWS_PROFILE")
-fi
+aws iam update-assume-role-policy \
+  --role-name "${ROLE_NAME}" \
+  --policy-document file://irsa-updated-trust.json \
+  --profile "${AWS_PROFILE}"
+
+# 4) Annotate the ServiceAccount with the IRSA role ARN (idempotent)
+ROLE_ARN=$(aws iam get-role --role-name "${ROLE_NAME}" \
+  --query 'Role.Arn' --output text --profile "${AWS_PROFILE}")
+
+kubectl annotate sa "${SA_NAME}" -n "${SA_NS}" \
+  eks.amazonaws.com/role-arn="${ROLE_ARN}" --overwrite
+
+# ========= IRSA for Dapr SNS/SQS pubsub (ServiceAccount: dapr-pubsub-sa) =========
+#echo "==> Configuring IRSA role for dapr-pubsub-sa"
+
+# Resolve cluster OIDC issuer (no https://)
+#OIDC_ISSUER=$(aws eks describe-cluster \
+#  --name "$CLUSTER_NAME" \
+#  --region "$REGION" \
+#  --profile "$AWS_PROFILE" \
+#  --query "cluster.identity.oidc.issuer" \
+#  --output text | sed 's|https://||')
+
+#ROLE_NAME="DaprSNS_SQS_PubSubRole"
+#ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" \
+#  --query 'Role.Arn' --output text --profile "$AWS_PROFILE" 2>/dev/null || echo "")
+
+#if [[ -z "$ROLE_ARN" || "$ROLE_ARN" == "None" ]]; then
+#  cat > irsa-snssqs-trust.json <<JSON
+#{
+#  "Version": "2012-10-17",
+#  "Statement": [
+#    {
+#      "Effect": "Allow",
+#      "Principal": {
+#        "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}"
+#      },
+#      "Action": "sts:AssumeRoleWithWebIdentity",
+#      "Condition": {
+#        "StringEquals": {
+#          "${OIDC_ISSUER}:aud": "sts.amazonaws.com",
+#          "${OIDC_ISSUER}:sub": "system:serviceaccount:dapr-apps:dapr-pubsub-sa"
+#        }
+#      }
+#    }
+#  ]
+#}
+#JSON
+
+#  echo "   Creating IAM role: $ROLE_NAME"
+#  aws iam create-role \
+#    --role-name "$ROLE_NAME" \
+#    --assume-role-policy-document file://irsa-snssqs-trust.json \
+#    --profile "$AWS_PROFILE" >/dev/null
+#  ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" \
+#    --query 'Role.Arn' --output text --profile "$AWS_PROFILE")
+#fi
 
 # Attach managed policies for lab (simple and permissive)
-aws iam attach-role-policy \
-  --role-name "$ROLE_NAME" \
-  --policy-arn arn:aws:iam::aws:policy/AmazonSNSFullAccess \
-  --profile "$AWS_PROFILE" >/dev/null 2>&1 || true
+#aws iam attach-role-policy \
+#  --role-name "$ROLE_NAME" \
+#  --policy-arn arn:aws:iam::aws:policy/AmazonSNSFullAccess \
+#  --profile "$AWS_PROFILE" >/dev/null 2>&1 || true
 
-aws iam attach-role-policy \
-  --role-name "$ROLE_NAME" \
-  --policy-arn arn:aws:iam::aws:policy/AmazonSQSFullAccess \
-  --profile "$AWS_PROFILE" >/dev/null 2>&1 || true
+#aws iam attach-role-policy \
+#  --role-name "$ROLE_NAME" \
+#  --policy-arn arn:aws:iam::aws:policy/AmazonSQSFullAccess \
+#  --profile "$AWS_PROFILE" >/dev/null 2>&1 || true
 
 echo "   IRSA role ARN: $ROLE_ARN"
 
@@ -319,107 +393,97 @@ fi
 echo "   IRSA v2 policy ARN: $NEW_POLICY_ARN"
 
 # ========= IRSA ServiceAccounts =========
-kubectl apply -f k8s/00-namespace.yaml
-kubectl apply -f k8s/01-serviceaccount.yaml
-
-# ========= SNS Topic guard (avoid tag mismatch) =========
-#echo "==> Deleting existing SNS topic 'orders' (if present)"
-#ORDERS_TOPIC_ARN=$(aws sns list-topics --region "$REGION" --profile "$AWS_PROFILE" \
- # --query "Topics[?ends_with(TopicArn, ':orders')].TopicArn | [0]" \
- # --output text 2>/dev/null)
-#if [[ -n "$ORDERS_TOPIC_ARN" && "$ORDERS_TOPIC_ARN" != "None" ]]; then
- # aws sns delete-topic --topic-arn "$ORDERS_TOPIC_ARN" --region "$REGION" --profile "$AWS_PROFILE" || true
- # echo "   Deleted $ORDERS_TOPIC_ARN"
-#fi
+#kubectl apply -f k8s/00-namespace.yaml
+#kubectl apply -f k8s/01-serviceaccount.yaml
 
 # ========= Dapr AWS SNS/SQS component =========
 kubectl apply -f dapr/snssqs-pubsub.yaml
 
 
 # === Ensure SNS->SQS subscription exists (orders -> orderservice) ===
-echo "==> Ensuring SNS->SQS subscription exists (orders -> orderservice)"
-ORDERS_TOPIC_ARN=$(aws sns list-topics --region "$REGION" --profile "$AWS_PROFILE" \
-  --query "Topics[?ends_with(TopicArn, ':orders')].TopicArn | [0]" --output text 2>/dev/null)
+#echo "==> Ensuring SNS->SQS subscription exists (orders -> orderservice)"
+#ORDERS_TOPIC_ARN=$(aws sns list-topics --region "$REGION" --profile "$AWS_PROFILE" \
+#  --query "Topics[?ends_with(TopicArn, ':orders')].TopicArn | [0]" --output text 2>/dev/null)
 
 
 # If topic is missing, create it (idempotent)
-if [[ -z "$ORDERS_TOPIC_ARN" || "$ORDERS_TOPIC_ARN" == "None" ]]; then
-  echo "   'orders' topic missing; creating it now..."
-  ORDERS_TOPIC_ARN=$(aws sns create-topic \
-    --name orders \
-    --region "$REGION" --profile "$AWS_PROFILE" \
-    --query 'TopicArn' --output text)
-  echo "   Created topic: $ORDERS_TOPIC_ARN"
+#if [[ -z "$ORDERS_TOPIC_ARN" || "$ORDERS_TOPIC_ARN" == "None" ]]; then
+#  echo "   'orders' topic missing; creating it now..."
+#  ORDERS_TOPIC_ARN=$(aws sns create-topic \
+#    --name orders \
+#    --region "$REGION" --profile "$AWS_PROFILE" \
+#    --query 'TopicArn' --output text)
+#  echo "   Created topic: $ORDERS_TOPIC_ARN"
   # brief wait to allow SNS to propagate topic metadata
-  sleep 3
-fi
+#  sleep 3
+#fi
 
 
-ORDERS_QUEUE_URL=$(aws sqs list-queues --region "$REGION" --profile "$AWS_PROFILE" \
-  --query "QueueUrls[?contains(@, 'orderservice')]" --output text 2>/dev/null)
-ORDERS_QUEUE_ARN=$(aws sqs get-queue-attributes --queue-url "$ORDERS_QUEUE_URL" \
-  --attribute-name QueueArn --region "$REGION" --profile "$AWS_PROFILE" \
-  --query 'Attributes.QueueArn' --output text 2>/dev/null)
+#ORDERS_QUEUE_URL=$(aws sqs list-queues --region "$REGION" --profile "$AWS_PROFILE" \
+#  --query "QueueUrls[?contains(@, 'orderservice')]" --output text 2>/dev/null)
+#ORDERS_QUEUE_ARN=$(aws sqs get-queue-attributes --queue-url "$ORDERS_QUEUE_URL" \
+#  --attribute-name QueueArn --region "$REGION" --profile "$AWS_PROFILE" \
+#  --query 'Attributes.QueueArn' --output text 2>/dev/null)
 
 # Create subscription if missing
-SUB_ARN=$(aws sns list-subscriptions-by-topic \
-  --topic-arn "$ORDERS_TOPIC_ARN" --region "$REGION" --profile "$AWS_PROFILE" \
-  --query "Subscriptions[?Endpoint=='${ORDERS_QUEUE_ARN}'].SubscriptionArn | [0]" \
-  --output text 2>/dev/null)
+#SUB_ARN=$(aws sns list-subscriptions-by-topic \
+#  --topic-arn "$ORDERS_TOPIC_ARN" --region "$REGION" --profile "$AWS_PROFILE" \
+#  --query "Subscriptions[?Endpoint=='${ORDERS_QUEUE_ARN}'].SubscriptionArn | [0]" \
+#  --output text 2>/dev/null)
 
-if [[ -z "$SUB_ARN" || "$SUB_ARN" == "None" ]]; then
-  echo "   Creating subscription: $ORDERS_TOPIC_ARN -> $ORDERS_QUEUE_ARN"
-  SUB_ARN=$(aws sns subscribe \
-    --topic-arn "$ORDERS_TOPIC_ARN" \
-    --protocol sqs \
-    --notification-endpoint "$ORDERS_QUEUE_ARN" \
-    --region "$REGION" --profile "$AWS_PROFILE" \
-    --query 'SubscriptionArn' --output text)
-  echo "   Subscription ARN: $SUB_ARN"
-else
-  echo "   Subscription already exists: $SUB_ARN"
-fi
+#if [[ -z "$SUB_ARN" || "$SUB_ARN" == "None" ]]; then
+#  echo "   Creating subscription: $ORDERS_TOPIC_ARN -> $ORDERS_QUEUE_ARN"
+#  SUB_ARN=$(aws sns subscribe \
+#    --topic-arn "$ORDERS_TOPIC_ARN" \
+#    --protocol sqs \
+#    --notification-endpoint "$ORDERS_QUEUE_ARN" \
+#    --region "$REGION" --profile "$AWS_PROFILE" \
+#    --query 'SubscriptionArn' --output text)
+#  echo "   Subscription ARN: $SUB_ARN"
+#else
+#  echo "   Subscription already exists: $SUB_ARN"
+#fi
 
 # === Ensure SQS queue policy allows SNS deliveries ===
-echo "==> Ensuring SQS queue policy allows SNS topic to send messages"
-CURRENT_POLICY=$(aws sqs get-queue-attributes \
-  --queue-url "$ORDERS_QUEUE_URL" \
-  --attribute-name Policy \
-  --region "$REGION" --profile "$AWS_PROFILE" \
-  --query 'Attributes.Policy' --output text 2>/dev/null)
+#echo "==> Ensuring SQS queue policy allows SNS topic to send messages"
+#CURRENT_POLICY=$(aws sqs get-queue-attributes \
+#  --queue-url "$ORDERS_QUEUE_URL" \
+#  --attribute-name Policy \
+#  --region "$REGION" --profile "$AWS_PROFILE" \
+#  --query 'Attributes.Policy' --output text 2>/dev/null)
 
-NEEDS_POLICY_UPDATE="true"
-if [[ -n "$CURRENT_POLICY" && "$CURRENT_POLICY" != "None" ]]; then
-  echo "$CURRENT_POLICY" | grep -q "\"aws:SourceArn\":\"$ORDERS_TOPIC_ARN\"" && NEEDS_POLICY_UPDATE="false"
-fi
+#NEEDS_POLICY_UPDATE="true"
+#if [[ -n "$CURRENT_POLICY" && "$CURRENT_POLICY" != "None" ]]; then
+#  echo "$CURRENT_POLICY" | grep -q "\"aws:SourceArn\":\"$ORDERS_TOPIC_ARN\"" && NEEDS_POLICY_UPDATE="false"
+#fi
 
-if [[ "$NEEDS_POLICY_UPDATE" == "true" ]]; then
-  cat > sqs-allow-sns.json <<JSON
-{
-  "Version": "2012-10-17",
-  "Id": "QueuePolicy",
-  "Statement": [
-    {
-      "Sid": "Allow-SNS-SendMessage",
-      "Effect": "Allow",
-      "Principal": { "Service": "sns.amazonaws.com" },
-      "Action": "SQS:SendMessage",
-      "Resource": "$ORDERS_QUEUE_ARN",
-      "Condition": {
-        "ArnEquals": { "aws:SourceArn": "$ORDERS_TOPIC_ARN" }
-      }
-    }
-  ]
-}
-JSON
-  aws sqs set-queue-attributes \
-    --queue-url "$ORDERS_QUEUE_URL" \
-    --attributes Policy="file://sqs-allow-sns.json" \
-    --region "$REGION" --profile "$AWS_PROFILE"
-  echo "   Applied queue policy to allow SNS deliveries."
-else
-  echo "   Queue policy already allows SNS deliveries."
-fi
+#if [[ "$NEEDS_POLICY_UPDATE" == "true" ]]; then
+#  cat > sqs-allow-sns.json <<JSON
+#{
+#  "Version": "2012-10-17",
+#  "Id": "QueuePolicy",
+#  "Statement": [
+#    {
+#      "Sid": "Allow-SNS-SendMessage",
+#      "Effect": "Allow",
+#      "Principal": { "Service": "sns.amazonaws.com" },
+#      "Action": "SQS:SendMessage",
+#      "Resource": "$ORDERS_QUEUE_ARN",
+#      "Condition": {
+#        "ArnEquals": { "aws:SourceArn": "$ORDERS_TOPIC_ARN" }
+#      }
+#    }
+#  ]
+#}
+#JSON
+#  aws sqs set-queue-attributes \
+#    --queue-url "$ORDERS_QUEUE_URL" \
+#    --attributes Policy="file://sqs-allow-sns.json" \
+#    --region "$REGION" --profile "$AWS_PROFILE"
+#  echo "   Applied queue policy to allow SNS deliveries."
+#else
+#  echo "   Queue policy already allows SNS deliveries."
+#fi
 
 
 # ========= Build & Push Images (automatic) =========
@@ -447,30 +511,53 @@ aws ecr describe-repositories --repository-names "$ORDER_REPO" --profile "$AWS_P
 
 echo "==> Building & pushing ProductService -> $PRODUCT_IMAGE"
 test -f "${PRODUCT_DIR}/Dockerfile" || { echo "Missing ${PRODUCT_DIR}/Dockerfile"; exit 1; }
-docker buildx build --platform "$PLATFORM" -t "$PRODUCT_IMAGE" -f "${PRODUCT_DIR}/Dockerfile" "${PRODUCT_DIR}" --push
+
+# ProductService build & push
+docker buildx build --platform "$PLATFORM" \
+  -t "$PRODUCT_IMAGE" \
+  -f "${PRODUCT_DIR}/Dockerfile" \
+  "${PRODUCT_DIR}" \
+  --push
+
+
+# --- Silence platform mismatch warning (optional but recommended) ---
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
+docker buildx create --name amd64builder --use >/dev/null 2>&1 || true
+docker buildx inspect --bootstrap >/dev/null 2>&1 || true
+
 
 echo "==> Building & pushing OrderService   -> $ORDER_IMAGE"
 test -f "${ORDER_DIR}/Dockerfile" || { echo "Missing ${ORDER_DIR}/Dockerfile"; exit 1; }
-docker buildx build --platform "$PLATFORM" -t "$ORDER_IMAGE" -f "${ORDER_DIR}/Dockerfile" "${ORDER_DIR}" --push
 
+docker buildx build --platform "$PLATFORM" \
+  -t "$ORDER_IMAGE" \
+  -f "${ORDER_DIR}/Dockerfile" \
+  "${ORDER_DIR}" \
+  --push
+
+
+# ========= App Deployments =========
+kubectl apply -f k8s/10-productservice.yaml
+kubectl apply -f k8s/11-orderservice.yaml
 
 # Pin deployments to the freshly pushed timestamp tags
 kubectl set image deployment/productservice \
   productservice=${ECR}/${PRODUCT_REPO}:${IMAGE_TAG} -n "$NAMESPACE"
-
 kubectl set image deployment/orderservice \
   orderservice=${ECR}/${ORDER_REPO}:${IMAGE_TAG} -n "$NAMESPACE"
 
+# Restart once so pods pick up refreshed IRSA token (issuer/trust may have just changed)
+kubectl rollout restart deployment/productservice -n "$NAMESPACE" || true
+kubectl rollout restart deployment/orderservice  -n "$NAMESPACE" || true
 
-# ========= App Deployments =========
-kubectl apply -f k8s/10-productservice.yaml -f k8s/11-orderservice.yaml
+echo "==> Waiting for Product & Order deployments (after IRSA refresh)"
+kubectl rollout status deployment/productservice -n "$NAMESPACE"
+kubectl rollout status deployment/orderservice  -n "$NAMESPACE"
 
 # ========= Subscription =========
 kubectl apply -f dapr/subscription-orders.yaml
 
 echo "==> Waiting for Product & Order deployments"
-kubectl wait --for=condition=Available deployment/productservice -n "$NAMESPACE" --timeout=300s || true
-kubectl wait --for=condition=Available deployment/orderservice   -n "$NAMESPACE" --timeout=300s || true
 kubectl get pods -n "$NAMESPACE" -o wide || true
 
 # ========= Test the deployment =========

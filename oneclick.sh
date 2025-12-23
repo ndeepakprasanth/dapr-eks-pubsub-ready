@@ -553,6 +553,11 @@ kubectl rollout status deployment/orderservice  -n "$NAMESPACE"
 # ========= Subscription =========
 kubectl apply -f dapr/subscription-orders.yaml
 
+# Restart OrderService so daprd reloads the subscription
+kubectl rollout restart deployment/orderservice -n "$NAMESPACE" || true
+kubectl rollout status  deployment/orderservice -n "$NAMESPACE"
+
+
 echo "==> Waiting for Product & Order deployments"
 kubectl get pods -n "$NAMESPACE" -o wide || true
 

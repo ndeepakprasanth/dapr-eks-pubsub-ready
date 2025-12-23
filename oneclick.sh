@@ -236,32 +236,48 @@ aws iam get-open-id-connect-provider \
   --client-id-list sts.amazonaws.com \
   --profile "${AWS_PROFILE}"
 
-# 3) Update the IRSA role trust policy to match THIS issuer & SA (idempotent)
+
+# 3) Desired trust policy (scoped to SA:dapr-pubsub-sa in ns:dapr-apps)
 cat > irsa-updated-trust.json <<JSON
 {
   "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": { "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}" },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "${OIDC_ISSUER}:aud": "sts.amazonaws.com",
-          "${OIDC_ISSUER}:sub": "system:serviceaccount:${SA_NS}:${SA_NAME}"
-        }
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}" },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "${OIDC_ISSUER}:aud": "sts.amazonaws.com",
+        "${OIDC_ISSUER}:sub": "system:serviceaccount:${SA_NS}:${SA_NAME}"
       }
     }
-  ]
+  }]
 }
 JSON
 
+# 4) Create the IRSA role if missing (idempotent)
+aws iam get-role --role-name "${ROLE_NAME}" --profile "${AWS_PROFILE}" >/dev/null 2>&1 || \
+aws iam create-role \
+  --role-name "${ROLE_NAME}" \
+  --assume-role-policy-document file://irsa-updated-trust.json \
+  --profile "${AWS_PROFILE}"
+
+# 5) Attach SNS/SQS policies (idempotent, suitable for a lab)
+aws iam attach-role-policy --role-name "${ROLE_NAME}" \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSNSFullAccess \
+  --profile "${AWS_PROFILE}" >/dev/null 2>&1 || true
+
+aws iam attach-role-policy --role-name "${ROLE_NAME}" \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSQSFullAccess \
+  --profile "${AWS_PROFILE}" >/dev/null 2>&1 || true
+
+# 6) Update trust (idempotent)
 aws iam update-assume-role-policy \
   --role-name "${ROLE_NAME}" \
   --policy-document file://irsa-updated-trust.json \
   --profile "${AWS_PROFILE}"
 
-# 4) Annotate the ServiceAccount with the IRSA role ARN (idempotent)
+# 7) Annotate the ServiceAccount with the IRSA role ARN (idempotent)
 ROLE_ARN=$(aws iam get-role --role-name "${ROLE_NAME}" \
   --query 'Role.Arn' --output text --profile "${AWS_PROFILE}")
 
@@ -305,32 +321,12 @@ kubectl annotate sa "${SA_NAME}" -n "${SA_NS}" \
 #}
 #JSON
 
-#  echo "   Creating IAM role: $ROLE_NAME"
-#  aws iam create-role \
-#    --role-name "$ROLE_NAME" \
-#    --assume-role-policy-document file://irsa-snssqs-trust.json \
-#    --profile "$AWS_PROFILE" >/dev/null
-#  ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" \
-#    --query 'Role.Arn' --output text --profile "$AWS_PROFILE")
-#fi
-
-# Attach managed policies for lab (simple and permissive)
-#aws iam attach-role-policy \
-#  --role-name "$ROLE_NAME" \
-#  --policy-arn arn:aws:iam::aws:policy/AmazonSNSFullAccess \
-#  --profile "$AWS_PROFILE" >/dev/null 2>&1 || true
-
-#aws iam attach-role-policy \
-#  --role-name "$ROLE_NAME" \
-#  --policy-arn arn:aws:iam::aws:policy/AmazonSQSFullAccess \
-#  --profile "$AWS_PROFILE" >/dev/null 2>&1 || true
-
 echo "   IRSA role ARN: $ROLE_ARN"
 
 # Annotate ServiceAccount (idempotent)
-echo "==> Annotating ServiceAccount dapr-pubsub-sa with IRSA role"
-kubectl annotate sa dapr-pubsub-sa -n dapr-apps \
-  "eks.amazonaws.com/role-arn=${ROLE_ARN}" --overwrite >/dev/null 2>&1 || true
+#echo "==> Annotating ServiceAccount dapr-pubsub-sa with IRSA role"
+#kubectl annotate sa dapr-pubsub-sa -n dapr-apps \
+#  "eks.amazonaws.com/role-arn=${ROLE_ARN}" --overwrite >/dev/null 2>&1 || true
 
 
 

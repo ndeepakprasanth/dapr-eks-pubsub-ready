@@ -2,29 +2,28 @@
 Publishing test message...
   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
                                  Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100   132  100    76  100    56   1431   1054 --:--:-- --:--:-- --:--:--  2538
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100   132  100    76  100    56   1513   1115 --:--:-- --:--:-- --:--:--  2640
 {"ok":true,"published":{"orderId":999,"item":"test-laptop","price":1299.99}}pod "test-curl" deleted
 ==> Verifying delivery in OrderService logs...
 Delivery OK: OrderService received the event.
 
 ==> OrderService logs:
 OrderService listening on 8090
-OrderService received event: {"data":{"item":"test-item","orderId":123,"price":99.99},"datacontenttype":"application/json","id":"1d6360f6-1958-49f9-b332-d59f946ddffa","pubsubname":"snssqs-pubsub","source":"productservice","specversion":"1.0","time":"2025-12-23T16:46:56Z","topic":"orders","traceid":"","traceparent":"","tracestate":"","type":"com.dapr.event.sent"}
-OrderService received event: {"data":{"item":"test-laptop","orderId":999,"price":1299.99},"datacontenttype":"application/json","id":"e1d3a50f-01de-45f7-8531-30a5fb694605","pubsubname":"snssqs-pubsub","source":"productservice","specversion":"1.0","time":"2025-12-23T16:47:07Z","topic":"orders","traceid":"","traceparent":"","tracestate":"","type":"com.dapr.event.sent"}
+OrderService received event: {"data":{"item":"test-item","orderId":123,"price":99.99},"datacontenttype":"application/json","id":"644c87e5-03e5-48c6-a7b9-ef0820a74c4f","pubsubname":"snssqs-pubsub","source":"productservice","specversion":"1.0","time":"2025-12-24T18:19:47Z","topic":"orders","traceid":"","traceparent":"","tracestate":"","type":"com.dapr.event.sent"}
+OrderService received event: {"data":{"item":"test-laptop","orderId":999,"price":1299.99},"datacontenttype":"application/json","id":"c03e4b72-5b5a-4d91-b35a-1fd98f009b41","pubsubname":"snssqs-pubsub","source":"productservice","specversion":"1.0","time":"2025-12-24T18:20:20Z","topic":"orders","traceid":"","traceparent":"","tracestate":"","type":"com.dapr.event.sent"}
 
 ==> Pod status:
-NAME                              READY   STATUS        RESTARTS   AGE   IP               NODE                             NOMINATED NODE   READINESS GATES
-orderservice-5689d449cc-f9zlv     1/2     Terminating   0          52s   192.168.4.44     ip-192-168-30-157.ec2.internal   <none>           <none>
-orderservice-7b88db947b-kbwgt     2/2     Running       0          37s   192.168.38.224   ip-192-168-37-123.ec2.internal   <none>           <none>
-productservice-6bd957c98f-tmb87   2/2     Running       0          54s   192.168.19.46    ip-192-168-30-157.ec2.internal   <none>           <none>
+NAME                              READY   STATUS    RESTARTS   AGE   IP               NODE                             NOMINATED NODE   READINESS GATES
+orderservice-867f58cf4d-x95q5     2/2     Running   0          53s   192.168.42.224   ip-192-168-32-166.ec2.internal   <none>           <none>
+productservice-694fd6d857-cm54r   2/2     Running   0          70s   192.168.30.215   ip-192-168-17-107.ec2.internal   <none>           <none>
 
 ==> Services:
-NAME                  TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)                               AGE
-orderservice          ClusterIP   10.100.66.142   <none>        8090/TCP                              64s
-orderservice-dapr     ClusterIP   None            <none>        80/TCP,50001/TCP,50002/TCP,9090/TCP   64s
-productservice        ClusterIP   10.100.30.212   <none>        8080/TCP                              67s
-productservice-dapr   ClusterIP   None            <none>        80/TCP,50001/TCP,50002/TCP,9090/TCP   67s
+NAME                  TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)                               AGE
+orderservice          ClusterIP   10.100.167.224   <none>        8090/TCP                              80s
+orderservice-dapr     ClusterIP   None             <none>        80/TCP,50001/TCP,50002/TCP,9090/TCP   80s
+productservice        ClusterIP   10.100.174.7     <none>        8080/TCP                              84s
+productservice-dapr   ClusterIP   None             <none>        80/TCP,50001/TCP,50002/TCP,9090/TCP   84s
 
 ==> Dapr components:
 NAME            AGE
-snssqs-pubsub   2m37s
+snssqs-pubsub   4m52s

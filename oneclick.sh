@@ -114,11 +114,6 @@ aws iam attach-role-policy \
   --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy \
   --profile "$AWS_PROFILE" 2>/dev/null || true
 
-# Create service account
-#kubectl create serviceaccount ebs-csi-controller-sa -n kube-system --dry-run=client -o yaml | \
-#kubectl annotate --local -f - eks.amazonaws.com/role-arn="arn:aws:iam::${ACCOUNT_ID}:role/AmazonEKS_EBS_CSI_DriverRole" -o yaml | \
-#kubectl apply -f - 2>/dev/null || true
-
 
 kubectl create serviceaccount ebs-csi-controller-sa -n kube-system --dry-run=client -o yaml \
   | kubectl annotate --local -f - \
@@ -284,51 +279,7 @@ ROLE_ARN=$(aws iam get-role --role-name "${ROLE_NAME}" \
 kubectl annotate sa "${SA_NAME}" -n "${SA_NS}" \
   eks.amazonaws.com/role-arn="${ROLE_ARN}" --overwrite
 
-# ========= IRSA for Dapr SNS/SQS pubsub (ServiceAccount: dapr-pubsub-sa) =========
-#echo "==> Configuring IRSA role for dapr-pubsub-sa"
-
-# Resolve cluster OIDC issuer (no https://)
-#OIDC_ISSUER=$(aws eks describe-cluster \
-#  --name "$CLUSTER_NAME" \
-#  --region "$REGION" \
-#  --profile "$AWS_PROFILE" \
-#  --query "cluster.identity.oidc.issuer" \
-#  --output text | sed 's|https://||')
-
-#ROLE_NAME="DaprSNS_SQS_PubSubRole"
-#ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" \
-#  --query 'Role.Arn' --output text --profile "$AWS_PROFILE" 2>/dev/null || echo "")
-
-#if [[ -z "$ROLE_ARN" || "$ROLE_ARN" == "None" ]]; then
-#  cat > irsa-snssqs-trust.json <<JSON
-#{
-#  "Version": "2012-10-17",
-#  "Statement": [
-#    {
-#      "Effect": "Allow",
-#      "Principal": {
-#        "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}"
-#      },
-#      "Action": "sts:AssumeRoleWithWebIdentity",
-#      "Condition": {
-#        "StringEquals": {
-#          "${OIDC_ISSUER}:aud": "sts.amazonaws.com",
-#          "${OIDC_ISSUER}:sub": "system:serviceaccount:dapr-apps:dapr-pubsub-sa"
-#        }
-#      }
-#    }
-#  ]
-#}
-#JSON
-
 echo "   IRSA role ARN: $ROLE_ARN"
-
-# Annotate ServiceAccount (idempotent)
-#echo "==> Annotating ServiceAccount dapr-pubsub-sa with IRSA role"
-#kubectl annotate sa dapr-pubsub-sa -n dapr-apps \
-#  "eks.amazonaws.com/role-arn=${ROLE_ARN}" --overwrite >/dev/null 2>&1 || true
-
-
 
 # ========= Enable OIDC provider for IRSA =========
 echo "==> OIDC provider already configured in EBS CSI section"
@@ -388,98 +339,9 @@ if [[ -z "${NEW_POLICY_ARN}" || "${NEW_POLICY_ARN}" == "None" ]]; then
 fi
 echo "   IRSA v2 policy ARN: $NEW_POLICY_ARN"
 
-# ========= IRSA ServiceAccounts =========
-#kubectl apply -f k8s/00-namespace.yaml
-#kubectl apply -f k8s/01-serviceaccount.yaml
 
 # ========= Dapr AWS SNS/SQS component =========
 kubectl apply -f dapr/snssqs-pubsub.yaml
-
-
-# === Ensure SNS->SQS subscription exists (orders -> orderservice) ===
-#echo "==> Ensuring SNS->SQS subscription exists (orders -> orderservice)"
-#ORDERS_TOPIC_ARN=$(aws sns list-topics --region "$REGION" --profile "$AWS_PROFILE" \
-#  --query "Topics[?ends_with(TopicArn, ':orders')].TopicArn | [0]" --output text 2>/dev/null)
-
-
-# If topic is missing, create it (idempotent)
-#if [[ -z "$ORDERS_TOPIC_ARN" || "$ORDERS_TOPIC_ARN" == "None" ]]; then
-#  echo "   'orders' topic missing; creating it now..."
-#  ORDERS_TOPIC_ARN=$(aws sns create-topic \
-#    --name orders \
-#    --region "$REGION" --profile "$AWS_PROFILE" \
-#    --query 'TopicArn' --output text)
-#  echo "   Created topic: $ORDERS_TOPIC_ARN"
-  # brief wait to allow SNS to propagate topic metadata
-#  sleep 3
-#fi
-
-
-#ORDERS_QUEUE_URL=$(aws sqs list-queues --region "$REGION" --profile "$AWS_PROFILE" \
-#  --query "QueueUrls[?contains(@, 'orderservice')]" --output text 2>/dev/null)
-#ORDERS_QUEUE_ARN=$(aws sqs get-queue-attributes --queue-url "$ORDERS_QUEUE_URL" \
-#  --attribute-name QueueArn --region "$REGION" --profile "$AWS_PROFILE" \
-#  --query 'Attributes.QueueArn' --output text 2>/dev/null)
-
-# Create subscription if missing
-#SUB_ARN=$(aws sns list-subscriptions-by-topic \
-#  --topic-arn "$ORDERS_TOPIC_ARN" --region "$REGION" --profile "$AWS_PROFILE" \
-#  --query "Subscriptions[?Endpoint=='${ORDERS_QUEUE_ARN}'].SubscriptionArn | [0]" \
-#  --output text 2>/dev/null)
-
-#if [[ -z "$SUB_ARN" || "$SUB_ARN" == "None" ]]; then
-#  echo "   Creating subscription: $ORDERS_TOPIC_ARN -> $ORDERS_QUEUE_ARN"
-#  SUB_ARN=$(aws sns subscribe \
-#    --topic-arn "$ORDERS_TOPIC_ARN" \
-#    --protocol sqs \
-#    --notification-endpoint "$ORDERS_QUEUE_ARN" \
-#    --region "$REGION" --profile "$AWS_PROFILE" \
-#    --query 'SubscriptionArn' --output text)
-#  echo "   Subscription ARN: $SUB_ARN"
-#else
-#  echo "   Subscription already exists: $SUB_ARN"
-#fi
-
-# === Ensure SQS queue policy allows SNS deliveries ===
-#echo "==> Ensuring SQS queue policy allows SNS topic to send messages"
-#CURRENT_POLICY=$(aws sqs get-queue-attributes \
-#  --queue-url "$ORDERS_QUEUE_URL" \
-#  --attribute-name Policy \
-#  --region "$REGION" --profile "$AWS_PROFILE" \
-#  --query 'Attributes.Policy' --output text 2>/dev/null)
-
-#NEEDS_POLICY_UPDATE="true"
-#if [[ -n "$CURRENT_POLICY" && "$CURRENT_POLICY" != "None" ]]; then
-#  echo "$CURRENT_POLICY" | grep -q "\"aws:SourceArn\":\"$ORDERS_TOPIC_ARN\"" && NEEDS_POLICY_UPDATE="false"
-#fi
-
-#if [[ "$NEEDS_POLICY_UPDATE" == "true" ]]; then
-#  cat > sqs-allow-sns.json <<JSON
-#{
-#  "Version": "2012-10-17",
-#  "Id": "QueuePolicy",
-#  "Statement": [
-#    {
-#      "Sid": "Allow-SNS-SendMessage",
-#      "Effect": "Allow",
-#      "Principal": { "Service": "sns.amazonaws.com" },
-#      "Action": "SQS:SendMessage",
-#      "Resource": "$ORDERS_QUEUE_ARN",
-#      "Condition": {
-#        "ArnEquals": { "aws:SourceArn": "$ORDERS_TOPIC_ARN" }
-#      }
-#    }
-#  ]
-#}
-#JSON
-#  aws sqs set-queue-attributes \
-#    --queue-url "$ORDERS_QUEUE_URL" \
-#    --attributes Policy="file://sqs-allow-sns.json" \
-#    --region "$REGION" --profile "$AWS_PROFILE"
-#  echo "   Applied queue policy to allow SNS deliveries."
-#else
-#  echo "   Queue policy already allows SNS deliveries."
-#fi
 
 
 # ========= Build & Push Images (automatic) =========

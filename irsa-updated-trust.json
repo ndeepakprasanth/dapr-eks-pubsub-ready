@@ -2,12 +2,12 @@
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Principal": { "Federated": "arn:aws:iam::946248011760:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/FF241A0F108A5468F9C7D477AFE8CB0C" },
+    "Principal": { "Federated": "arn:aws:iam::946248011760:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/506E897ADA84843046D840918332A971" },
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
       "StringEquals": {
-        "oidc.eks.us-east-1.amazonaws.com/id/FF241A0F108A5468F9C7D477AFE8CB0C:aud": "sts.amazonaws.com",
-        "oidc.eks.us-east-1.amazonaws.com/id/FF241A0F108A5468F9C7D477AFE8CB0C:sub": "system:serviceaccount:dapr-apps:dapr-pubsub-sa"
+        "oidc.eks.us-east-1.amazonaws.com/id/506E897ADA84843046D840918332A971:aud": "sts.amazonaws.com",
+        "oidc.eks.us-east-1.amazonaws.com/id/506E897ADA84843046D840918332A971:sub": "system:serviceaccount:dapr-apps:dapr-pubsub-sa"
       }
     }
   }]
